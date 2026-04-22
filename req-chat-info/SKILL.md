@@ -1,7 +1,158 @@
 ---
 name: req-chat-info
-description: 从需求沟通群中自动提取结构化需求信息。输入群名关键词，自动搜索群ID、拉取近期聊天记录，识别PRD文档、Ezone卡片链接、产品经理/前端/研发等人员角色，输出可直接用于录入需求台账的结构化结果。当用户说"从群里获取需求信息"、"帮我看看这个需求群"、"提取群里的需求信息"、"这个需求群叫XXX"时触发。可与 req-tracker skill 配合使用。
+description: 从需求沟通群中自动提取结构化需求信息。输入群名关键词，自动搜索群ID、拉取近期聊天记录，识别PRD文档、Ezone卡片链接、产品经理/UI/前端/研发等人员角色，输出可直接用于录入需求台账的结构化结果。对无法识别角色但发过文档的人员，会主动询问用户并将确认结果存入本地联系人档案，下次自动识别。当用户说"从群里获取需求信息"、"帮我看看这个需求群"、"提取群里的需求信息"、"这个需求群叫XXX"时触发。可与 req-tracker skill 配合使用。
 ---
+
+# req-chat-info — 需求群信息提取 Skill
+
+从需求沟通群中自动提取结构化需求信息，作为录入需求台账的前置步骤。
+
+---
+
+## 使用方式
+
+```bash
+# 提取群信息
+python3 skills/req-chat-info/scripts/extract.py \
+  --group-name "支持物理队列 AICP-2652" \
+  [--days 7] \
+  [--output human|json]
+
+# 确认未知人员角色（系统询问后，用户回复触发）
+python3 skills/req-chat-info/scripts/extract.py \
+  --confirm-roles '{"张三":"UI","李四":"依赖方研发"}'
+
+# 查看已知联系人档案
+python3 skills/req-chat-info/scripts/extract.py --list-contacts
+```
+
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--group-name` | 群名关键词 | 必填 |
+| `--days` | 拉取最近几天的消息 | 7 |
+| `--output` | 输出格式：human / json | human |
+| `--confirm-roles` | 确认未知人员角色，写入联系人档案 | — |
+| `--list-contacts` | 列出所有已知联系人 | — |
+
+---
+
+## 执行逻辑
+
+### Step 1 — 搜索群聊
+调用 `mcp_message.search_chats`，按关键词找群 ID。
+- **唯一匹配** → 直接使用
+- **多个匹配** → 列出所有结果，让用户确认
+
+### Step 2 — 解析群名中的 Ezone 卡片
+正则匹配群名中的 `[A-Z]+-\d+` 格式：
+```
+【支持物理队列 AICP-2652】需求沟通群
+                ↓
+https://ezone.ksyun.com/project/AICP/2652
+```
+
+### Step 3 — 拉取聊天记录
+调用 `mcp_message.get_chat_messages`，拉取近 N 天消息，解析：
+- `rich_text` 消息中的内嵌云文档（`doc` 类型元素）
+- `text` 消息中的 URL（kdocs / figma / ezone 链接）
+- 每条消息的发送者姓名、发送时间
+
+### Step 4 — 识别 PRD 文档
+1. 优先从消息中找名称含 "PRD" 的内嵌云文档
+2. 若无，调用 `mcp_yundoc.search` 搜索云文档库
+
+### Step 5 — 推断人员角色
+角色推断优先级：
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 | **本地联系人档案** | `references/contacts.json`，已确认的人自动复用 |
+| 2 | **发言内容关键词** | 见下表 |
+| 3 | **发过文档但无法判断** | 标记为"未知（发过文档）"，输出询问提示 |
+| 4 | 其他 | 标记为"参与者" |
+
+关键词规则（注意 UI同学 ≠ 前端同学）：
+
+| 角色 | 判断依据 |
+|------|---------|
+| 产品经理 | 发过 PRD / 需求文档 / 评审 / OpenAPI定义 等内容 |
+| **UI同学** | 发过 **Figma / 设计稿 / 交互设计 / UI稿 / 视觉** 等内容 |
+| **前端同学** | 发过 **联调 / 页面问题 / 组件 / vue / react** 等内容 |
+| 依赖方研发 | 发过 API文档 / 接口文档 / 实现方案 / 后端 等内容 |
+| 测试 | 发过 测试用例 / QA / 提测 / 测试报告 等内容 |
+
+### Step 6 — 未知角色询问
+对「发过文档但识别不出角色」的人员，输出询问提示：
+```
+⚠️  以下人员发过文档，但我不认识他们的身份，请告诉我：
+  1. 张三  →  发过：物理队列-任务文档.otl
+  2. 李四  →  发过：接口设计文档.otl
+
+角色选项：产品经理 / UI / 前端 / 依赖方研发 / 测试 / 其他
+
+回复格式：
+  python3 skills/req-chat-info/scripts/extract.py \
+    --confirm-roles '{"张三":"依赖方研发","李四":"前端"}'
+```
+用户确认后，角色信息写入 `references/contacts.json`，**下次同一个人自动识别**，不再询问。
+
+### Step 7 — 文档分类，写入日志文档
+所有文档按类型分类，**全部写入需求日志文档的「关联资源」章节**，不占台账字段：
+
+| 文档类型 | 识别依据 |
+|---------|---------|
+| PRD文档 | 名称含 PRD / 需求文档 |
+| UI设计稿 | Figma/MasterGo 链接，或名称含 设计稿/UI |
+| 依赖层文档 | 名称含 API文档/接口文档/实现方案/控制台实现/任务文档 |
+| Ezone卡片 | ezone.ksyun.com 域名 |
+| 附件 | 其他 |
+
+---
+
+## 联系人档案
+
+存储路径：`references/contacts.json`
+
+```json
+{
+  "孔尧": { "role": "依赖方研发", "team": "AICP后端", "note": "" },
+  "徐彤昊": { "role": "前端", "team": "AICP前端", "note": "" },
+  "杨凯文": { "role": "产品经理", "team": "AICP产品", "note": "" }
+}
+```
+
+- 每次提取先查此文件，命中则直接使用，不再做关键词推断
+- 用 `--confirm-roles` 写入，用 `--list-contacts` 查看
+
+---
+
+## 与 req-tracker 的配合
+
+```
+用户说"从群【XXX需求群】录需求"
+  ↓
+req-chat-info: extract.py 提取 → 发现未知人员 → 询问用户
+  ↓
+用户回复角色 → extract.py --confirm-roles 保存到档案
+  ↓
+req-tracker: req_add.py 录入台账（含关联资源）
+```
+
+---
+
+## 依赖
+
+- `wps-cli` skill（mcporter 调用 WPS 消息/云文档 API）
+- mcporter 配置路径：`skills/wps-cli/mcporter.json`
+
+---
+
+## 注意事项
+
+- `rich_text` 消息中的内嵌 doc 元素有时不带 URL，此时会 fallback 到云文档搜索
+- 若群消息较少（新群），建议增大 `--days` 参数
+- 联系人档案不含敏感信息，可提交到 git 统一管理
+
 
 # req-chat-info — 需求群信息提取 Skill
 

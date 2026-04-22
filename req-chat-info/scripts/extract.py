@@ -3,6 +3,7 @@
 extract.py — 从需求沟通群中提取结构化需求信息
 用法：
   python3 extract.py --group-name "支持物理队列 AICP-2652" [--days 7] [--output human|json]
+  python3 extract.py --confirm-roles '{"孔尧":"依赖方研发","徐彤昊":"前端"}'
 """
 import argparse
 import json
@@ -12,11 +13,14 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
-MCPORTER_CONFIG = os.path.join(os.path.dirname(__file__), "../../../wps-cli/mcporter.json")
+sys.path.insert(0, os.path.dirname(__file__))
+import contacts as contacts_db
+
+MCPORTER_CONFIG = os.path.join(os.path.dirname(__file__), "../../wps-cli/mcporter.json")
 EZONE_URL_TPL   = "https://ezone.ksyun.com/project/{project}/{seq}"
 
 # ── 人员角色推断关键词 ────────────────────────────────────────────────────────
-# 注意：UI 同学发 Figma/设计稿；前端发联调/页面交互问题；研发发接口/实现方案
+# UI同学发 Figma/设计稿；前端发联调/页面问题；研发发接口/实现方案
 ROLE_HINTS = {
     "产品经理": ["PRD", "prd", "需求文档", "评审", "OpenAPI定义", "需求说明", "验收标准"],
     "UI":       ["figma", "Figma", "设计稿", "设计文档", "交互设计", "UI稿", "视觉"],
@@ -26,18 +30,16 @@ ROLE_HINTS = {
 }
 
 # ── 文档类型识别规则 ─────────────────────────────────────────────────────────
-# 每条规则：(优先级, 类型key, 台账字段, 名称关键词列表, URL域名关键词列表)
 DOC_RULES = [
-    (1, "prd",        "PRD文档",      ["PRD", "prd", "需求文档"],          ["kdocs.cn"]),
-    (2, "ui",         "UI设计稿",     ["设计稿", "设计文档", "UI", "交互"], ["figma.com", "mastergo.com"]),
-    (3, "api",        "依赖层文档",   ["API文档", "接口文档", "OpenAPI", "swagger", "实现方案", "控制台实现"], ["kdocs.cn", "apifox", "swagger"]),
-    (4, "impl",       "依赖层文档",   ["实现方案", "控制台实现", "后端方案", "设计方案"], ["kdocs.cn"]),
-    (5, "ezone",      "Ezone卡片",    ["ezone"],                            ["ezone.ksyun.com"]),
-    (9, "other",      "附件",         [],                                   ["kdocs.cn", "figma.com"]),
+    (1, "prd",   "PRD文档",    ["PRD", "prd", "需求文档"],                              ["kdocs.cn"]),
+    (2, "ui",    "UI设计稿",   ["设计稿", "设计文档", "UI", "交互"],                    ["figma.com", "mastergo.com"]),
+    (3, "api",   "依赖层文档", ["API文档", "接口文档", "OpenAPI", "swagger"],            ["kdocs.cn", "apifox", "swagger"]),
+    (4, "impl",  "依赖层文档", ["实现方案", "控制台实现", "后端方案", "设计方案", "任务文档"], ["kdocs.cn"]),
+    (5, "ezone", "Ezone卡片",  ["ezone"],                                               ["ezone.ksyun.com"]),
+    (9, "other", "附件",       [],                                                      ["kdocs.cn", "figma.com"]),
 ]
 
 def classify_doc(name, url):
-    """根据文档名和 URL 判断文档类型，返回 (type_key, field_name)"""
     name_lower = (name or "").lower()
     url_lower  = (url  or "").lower()
     for _, type_key, field_name, name_kws, url_kws in sorted(DOC_RULES, key=lambda x: x[0]):
@@ -75,7 +77,6 @@ def get_chat_messages(chat_id, days=7):
     return [m for m in items if m.get("ctime", 0) / 1000 >= start_ts]
 
 def parse_messages(messages):
-    """解析消息，提取文本、文档、发送者"""
     extracted = []
     for msg in messages:
         sender      = msg.get("sender", {})
@@ -85,13 +86,11 @@ def parse_messages(messages):
             tz=timezone(timedelta(hours=8))
         ).strftime("%Y-%m-%d %H:%M")
 
-        text_parts = []
-        docs       = []
-        msg_type   = msg.get("type", "")
+        text_parts, docs = [], []
+        msg_type = msg.get("type", "")
 
         if msg_type == "text":
             text_parts.append(msg.get("content", {}).get("text", {}).get("content", ""))
-
         elif msg_type == "rich_text":
             for line in msg.get("content", {}).get("rich_text", {}).get("elements", []):
                 for el in line.get("elements", []):
@@ -102,47 +101,68 @@ def parse_messages(messages):
                         docs.append({"name": dc.get("name", "云文档"), "url": dc.get("url", ""), "source": "inline"})
 
         full_text = " ".join(t for t in text_parts if t.strip())
-
-        # 从文本中提取 URL
         for url in re.findall(r'https?://[^\s\u4e00-\u9fff"\'<>]+', full_text):
             label = "Figma设计稿" if "figma.com" in url else \
-                    "Ezone卡片"   if "ezone.ksyun.com" in url else \
-                    "云文档链接"
+                    "Ezone卡片"   if "ezone.ksyun.com" in url else "云文档链接"
             docs.append({"name": label, "url": url, "source": "text"})
 
         if full_text.strip() or docs:
             extracted.append({
-                "sender": sender_name,
+                "sender":    sender_name,
                 "sender_id": sender.get("id", ""),
-                "date": date_str,
-                "text": full_text.strip(),
-                "docs": docs,
+                "date":      date_str,
+                "text":      full_text.strip(),
+                "docs":      docs,
             })
     return extracted
 
 def infer_roles(extracted):
-    """按发言内容推断每个人的角色"""
-    texts_by_sender = {}
+    """
+    角色推断优先级：
+    1. 本地联系人档案（contacts.json）
+    2. 发言内容关键词匹配
+    3. 发出过文档但无法判断 → 标记为 "未知（发过文档）"
+    4. 其他 → "参与者"
+    """
+    texts_by_sender  = {}
+    has_docs_by_sender = {}
     for m in extracted:
         texts_by_sender.setdefault(m["sender"], []).append(m["text"])
+        if m.get("docs"):
+            has_docs_by_sender[m["sender"]] = True
+
     result = {}
-    for sender, texts in texts_by_sender.items():
-        combined = " ".join(texts)
-        # 检查文档类型也纳入判断
+    for sender in texts_by_sender:
+        # 1. 查联系人档案
+        known_role = contacts_db.get_role(sender)
+        if known_role:
+            result[sender] = known_role
+            continue
+
+        # 2. 关键词匹配（文本 + 文档名）
+        combined = " ".join(texts_by_sender[sender])
         for m in extracted:
             if m["sender"] == sender:
                 for doc in m.get("docs", []):
                     combined += " " + doc.get("name", "") + " " + doc.get("url", "")
-        matched = "参与者"
+
+        matched = None
         for role, kws in ROLE_HINTS.items():
             if any(kw in combined for kw in kws):
                 matched = role
                 break
-        result[sender] = matched
+
+        if matched:
+            result[sender] = matched
+        elif has_docs_by_sender.get(sender):
+            # 3. 发过文档但识别不出角色 → 需要确认
+            result[sender] = "未知（发过文档）"
+        else:
+            result[sender] = "参与者"
+
     return result
 
 def search_prd_in_cloud(req_name):
-    """fallback：在云文档里搜 PRD"""
     try:
         r = mcpcall("ksc-mcp-wps.mcp_yundoc.search",
             body={"keyword": f"PRD {req_name}", "page_size": 5})
@@ -173,11 +193,42 @@ def clean_req_name(chat_name, ezone_info):
 
 def main():
     parser = argparse.ArgumentParser(description="从需求沟通群提取结构化需求信息")
-    parser.add_argument("--group-name", required=True, help="群名关键词")
-    parser.add_argument("--days",   type=int, default=7,       help="拉取最近几天消息（默认7）")
-    parser.add_argument("--output", choices=["human","json"],  default="human")
+    parser.add_argument("--group-name",    help="群名关键词")
+    parser.add_argument("--days",          type=int, default=7)
+    parser.add_argument("--output",        choices=["human", "json"], default="human")
+    parser.add_argument("--confirm-roles", help='确认未知人员角色，JSON格式：{"姓名":"角色","姓名2":"角色2"}')
+    parser.add_argument("--list-contacts", action="store_true", help="列出所有已知联系人")
     args = parser.parse_args()
 
+    # ── 子命令：列出联系人 ────────────────────────────────────────────────────
+    if args.list_contacts:
+        contacts = contacts_db.list_all()
+        if not contacts:
+            print("（联系人档案为空）")
+        else:
+            print(f"{'姓名':<12} {'角色':<12} {'团队'}")
+            print("─" * 40)
+            for name, info in contacts.items():
+                print(f"{name:<12} {info.get('role',''):<12} {info.get('team','')}")
+        return
+
+    # ── 子命令：确认未知人员角色并写入档案 ────────────────────────────────────
+    if args.confirm_roles:
+        try:
+            confirmations = json.loads(args.confirm_roles)
+        except Exception:
+            print("--confirm-roles 格式错误，应为 JSON 字符串", file=sys.stderr)
+            sys.exit(1)
+        for name, role in confirmations.items():
+            contacts_db.upsert(name, role)
+            print(f"  ✅ 已保存: {name} → {role}")
+        print(f"\n共保存 {len(confirmations)} 条联系人信息。")
+        return
+
+    if not args.group_name:
+        parser.error("--group-name 或 --confirm-roles 或 --list-contacts 必须指定一个")
+
+    # ── 主流程：提取群信息 ─────────────────────────────────────────────────────
     print(f"🔍 搜索群：{args.group_name}")
     groups = search_group(args.group_name)
     if not groups:
@@ -200,9 +251,8 @@ def main():
     extracted = parse_messages(messages)
     print(f"  共 {len(messages)} 条")
 
-    # 聚合所有文档，去重，分类
-    seen_urls = set()
-    all_docs  = []
+    # 聚合文档
+    seen_urls, all_docs = set(), []
     for m in extracted:
         for doc in m.get("docs", []):
             url = doc.get("url", "")
@@ -210,16 +260,9 @@ def main():
                 continue
             seen_urls.add(url)
             type_key, field_name = classify_doc(doc["name"], url)
-            all_docs.append({
-                "type_key":   type_key,
-                "field_name": field_name,
-                "name":       doc["name"],
-                "url":        url,
-                "sender":     m["sender"],
-                "date":       m["date"],
-            })
+            all_docs.append({**doc, "type_key": type_key, "field_name": field_name,
+                              "sender": m["sender"], "date": m["date"]})
 
-    # 找 PRD
     prd_doc = next((d for d in all_docs if d["type_key"] == "prd"), None)
     if not prd_doc:
         fallback = search_prd_in_cloud(req_name)
@@ -230,30 +273,31 @@ def main():
             all_docs.insert(0, prd_doc)
 
     # 推断角色
-    roles        = infer_roles(extracted)
-    pm_list      = [n for n, r in roles.items() if r == "产品经理"]
-    ui_list      = [n for n, r in roles.items() if r == "UI"]
-    frontend_list= [n for n, r in roles.items() if r == "前端"]
-    dev_list     = [n for n, r in roles.items() if r == "研发"]
+    roles         = infer_roles(extracted)
+    unknown_doc_senders = [n for n, r in roles.items() if r == "未知（发过文档）"]
+    pm_list       = [n for n, r in roles.items() if r == "产品经理"]
+    ui_list       = [n for n, r in roles.items() if r == "UI"]
+    frontend_list = [n for n, r in roles.items() if r == "前端"]
+    dev_list      = [n for n, r in roles.items() if r == "研发" or r == "依赖方研发"]
 
-    # 按台账字段归组文档
     docs_by_field = {}
     for doc in all_docs:
         docs_by_field.setdefault(doc["field_name"], []).append(doc)
 
     result = {
-        "chat_id":    chat_id,
-        "chat_name":  chat_name,
-        "req_name":   req_name,
-        "ezone":      ezone_info["url"] if ezone_info else None,
-        "prd":        prd_doc["url"] if prd_doc else None,
-        "pm":         pm_list[0] if pm_list else None,
-        "ui":         ", ".join(ui_list) or None,
-        "frontend":   ", ".join(frontend_list) or None,
-        "dev":        ", ".join(dev_list) or None,
-        "participants": [{"name": n, "role": r} for n, r in sorted(roles.items(), key=lambda x: x[1])],
-        "docs_by_field": docs_by_field,
-        "all_docs":   all_docs,
+        "chat_id":   chat_id,
+        "chat_name": chat_name,
+        "req_name":  req_name,
+        "ezone":     ezone_info["url"] if ezone_info else None,
+        "prd":       prd_doc["url"] if prd_doc else None,
+        "pm":        pm_list[0] if pm_list else None,
+        "ui":        ", ".join(ui_list) or None,
+        "frontend":  ", ".join(frontend_list) or None,
+        "dev":       ", ".join(dev_list) or None,
+        "participants":          [{"name": n, "role": r} for n, r in sorted(roles.items(), key=lambda x: x[1])],
+        "unknown_doc_senders":   unknown_doc_senders,
+        "docs_by_field":         docs_by_field,
+        "all_docs":              all_docs,
     }
 
     if args.output == "json":
@@ -264,20 +308,20 @@ def main():
     print(f"\n{'='*55}")
     print(f"📋 需求信息提取结果")
     print(f"{'='*55}")
-    print(f"需求名称:  {result['req_name']}")
-    print(f"Ezone卡片: {result['ezone'] or '未找到'}")
-    print(f"PRD文档:   {result['prd'] or '未找到'}")
+    print(f"需求名称:   {result['req_name']}")
+    print(f"Ezone卡片:  {result['ezone'] or '未找到'}")
+    print(f"PRD文档:    {result['prd'] or '未找到'}")
     print()
-    print(f"产品经理:  {result['pm']       or '未识别'}")
-    print(f"UI同学:    {result['ui']        or '未识别'}")
-    print(f"前端同学:  {result['frontend']  or '未识别'}")
-    print(f"依赖方研发:{result['dev']       or '未识别'}")
+    print(f"产品经理:   {result['pm']       or '未识别'}")
+    print(f"UI同学:     {result['ui']        or '未识别'}")
+    print(f"前端同学:   {result['frontend']  or '未识别'}")
+    print(f"依赖方研发: {result['dev']       or '未识别'}")
     print()
     print("参与人员:")
     for p in result["participants"]:
-        print(f"  - {p['name']} ({p['role']})")
+        marker = " ⚠️" if p["role"] == "未知（发过文档）" else ""
+        print(f"  - {p['name']} ({p['role']}){marker}")
 
-    # 按台账字段分类展示文档
     FIELD_ORDER = ["PRD文档", "UI设计稿", "依赖层文档", "Ezone卡片", "附件"]
     has_docs = False
     for field in FIELD_ORDER:
@@ -285,7 +329,7 @@ def main():
         if not docs:
             continue
         if not has_docs:
-            print(f"\n群内文档（按台账字段分类）:")
+            print(f"\n群内文档（按类型分类）:")
             has_docs = True
         print(f"\n  【{field}】")
         for doc in docs:
@@ -294,23 +338,34 @@ def main():
             if doc.get("sender"):
                 print(f"      发送人: {doc['sender']}  {doc.get('date','')}")
 
+    # ── 未知角色人员 → 输出询问提示 ──────────────────────────────────────────
+    if unknown_doc_senders:
+        print(f"\n{'─'*55}")
+        print("⚠️  以下人员发过文档，但我不认识他们的身份，请告诉我：")
+        for i, name in enumerate(unknown_doc_senders, 1):
+            # 展示他们发过的文档
+            their_docs = [d for d in all_docs if d.get("sender") == name]
+            doc_names  = "、".join(d["name"] for d in their_docs) or "（文档名未知）"
+            print(f"  {i}. {name}  →  发过：{doc_names}")
+        print()
+        print("角色选项：产品经理 / UI / 前端 / 依赖方研发 / 测试 / 其他")
+        print()
+        confirm_example = json.dumps(
+            {name: "角色" for name in unknown_doc_senders}, ensure_ascii=False)
+        print(f"回复格式（告诉我后我会保存到联系人档案）：")
+        print(f"  python3 skills/req-chat-info/scripts/extract.py \\")
+        print(f"    --confirm-roles '{confirm_example}'")
+
     print(f"\n{'─'*55}")
     print("可直接用于 req_add.py 的参数：")
     lines = ["python3 skills/req-tracker/scripts/req_add.py \\",
              f'  --name "{result["req_name"]}" \\']
-    if result["ezone"]:
-        lines.append(f'  --ezone "{result["ezone"]}" \\')
-    if result["prd"]:
-        lines.append(f'  --prd "{result["prd"]}" \\')
-    if result["pm"]:
-        lines.append(f'  --pm "{result["pm"]}" \\')
-    if result["ui"]:
-        lines.append(f'  --ui "{result["ui"]}" \\')
-    if result["dev"]:
-        lines.append(f'  --dev "{result["dev"]}" \\')
-    if result["frontend"]:
-        lines.append(f'  --frontend "{result["frontend"]}" \\')
-    # 把全部文档序列化为 JSON，传给 --docs
+    if result["ezone"]:   lines.append(f'  --ezone "{result["ezone"]}" \\')
+    if result["prd"]:     lines.append(f'  --prd "{result["prd"]}" \\')
+    if result["pm"]:      lines.append(f'  --pm "{result["pm"]}" \\')
+    if result["ui"]:      lines.append(f'  --ui "{result["ui"]}" \\')
+    if result["dev"]:     lines.append(f'  --dev "{result["dev"]}" \\')
+    if result["frontend"]:lines.append(f'  --frontend "{result["frontend"]}" \\')
     if all_docs:
         docs_json = json.dumps(all_docs, ensure_ascii=False)
         lines.append(f"  --docs '{docs_json}' \\")
