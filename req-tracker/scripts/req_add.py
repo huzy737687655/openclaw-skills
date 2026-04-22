@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""
+req_add.py — 新增需求
+自动创建：总览记录 + 详情记录 + 需求日志文档（季度文件夹下）
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+
+# ── 配置 ────────────────────────────────────────────────────────────────
+DRIVE_ID       = "LazE8wX"
+DB_FILE_ID     = "4xGJbDenmxMrRgWLhxVY1x64KCEum7ZGC"
+SHEET_OVERVIEW = 10
+SHEET_DETAIL   = 12
+LOG_ROOT_ID    = "j1mQ9XUCurMNDpMH1R7urxym6AbPT77gn"
+MCPORTER_CONFIG = os.path.join(os.path.dirname(__file__), "../../wps-cli/mcporter.json")
+QUARTERS_FILE   = os.path.join(os.path.dirname(__file__), "../references/quarters.json")
+
+def load_quarters():
+    if os.path.exists(QUARTERS_FILE):
+        with open(QUARTERS_FILE) as f:
+            return json.load(f)
+    return {"2026-Q2": "n6CW5xmmo1M3iqwAYYee1xC86uShcAsLf"}
+
+def save_quarters(q):
+    os.makedirs(os.path.dirname(QUARTERS_FILE), exist_ok=True)
+    with open(QUARTERS_FILE, "w") as f:
+        json.dump(q, f, ensure_ascii=False, indent=2)
+
+def quarter_key(date_str):
+    month = int(date_str[5:7])
+    q = (month - 1) // 3 + 1
+    return f"{date_str[:4]}-Q{q}"
+
+def mcpcall(tool, **kwargs):
+    args = ", ".join(f"{k}: {json.dumps(v)}" for k, v in kwargs.items())
+    cmd = ["mcporter", "--config", MCPORTER_CONFIG, "call", f"{tool}({args})"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        print(f"ERROR calling {tool}: {r.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(r.stdout.strip())
+
+def get_or_create_quarter_folder(date_str):
+    quarters = load_quarters()
+    key = quarter_key(date_str)
+    if key in quarters:
+        return quarters[key]
+    # 创建新季度文件夹
+    r = mcpcall("ksc-mcp-wps.file.create_in_folder",
+        path_params={"drive_id": DRIVE_ID, "parent_id": LOG_ROOT_ID},
+        body={"name": key, "file_type": "folder", "on_name_conflict": "fail"})
+    if r.get("code") == 0:
+        folder_id = r["data"]["id"]
+    elif "already" in str(r).lower() or r.get("code") == 409:
+        print(f"文件夹 {key} 已存在，请手动更新 quarters.json", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"创建季度文件夹失败: {r}", file=sys.stderr)
+        sys.exit(1)
+    quarters[key] = folder_id
+    save_quarters(quarters)
+    return folder_id
+
+def main():
+    parser = argparse.ArgumentParser(description="新增需求到管理台账")
+    parser.add_argument("--name",     required=True,  help="需求名称")
+    parser.add_argument("--ezone",    default="",     help="Ezone 卡片链接")
+    parser.add_argument("--prd",      default="",     help="PRD 文档链接")
+    parser.add_argument("--pm",       default="",     help="产品经理")
+    parser.add_argument("--dev",      default="",     help="依赖方研发")
+    parser.add_argument("--frontend", default="",     help="前端同学")
+    parser.add_argument("--projects", default="",     help="涉及项目")
+    parser.add_argument("--config",   default="",     help="涉及配置")
+    parser.add_argument("--dep-doc",  default="",     help="依赖层文档链接")
+    parser.add_argument("--status",   default="待评估", help="初始状态")
+    parser.add_argument("--date",     default=datetime.now().strftime("%Y-%m-%d"), help="需求提出时间 YYYY-MM-DD")
+    args = parser.parse_args()
+
+    name = args.name
+    date = args.date
+    print(f"📋 新增需求: {name}")
+
+    # Step 1: 创建详情记录（先不含日志文档 URL）
+    detail_fields = {"需求名称": name}
+    if args.pm:       detail_fields["产品经理"] = args.pm
+    if args.dev:      detail_fields["依赖方研发"] = args.dev
+    if args.frontend: detail_fields["前端同学"] = args.frontend
+    if args.projects: detail_fields["涉及项目"] = args.projects
+    if args.config:   detail_fields["涉及配置"] = args.config
+    if args.dep_doc:  detail_fields["依赖层文档"] = args.dep_doc
+
+    r_detail = mcpcall("wps365.dbsheet.create_records",
+        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_DETAIL},
+        body={"records": [{"fields_value": json.dumps(detail_fields, ensure_ascii=False)}]})
+    if r_detail.get("code") != 0:
+        print(f"❌ 创建详情记录失败: {r_detail}", file=sys.stderr)
+        sys.exit(1)
+    detail_record_id = r_detail["data"]["records"][0]["id"]
+    print(f"  ✅ 详情记录 ID: {detail_record_id}")
+
+    # Step 2: 创建需求日志文档
+    quarter_folder_id = get_or_create_quarter_folder(date)
+    month_day = date[5:].replace("-", "-")  # MM-DD
+    doc_name = f"{month_day}-[{name}]"
+    log_template = f"""# {doc_name} 需求日志
+
+## 基本信息
+- **需求名称**: {name}
+- **产品经理**: {args.pm or '待确认'}
+- **创建时间**: {date}
+
+---
+
+## 关联资源
+
+### 需求相关群
+| 群名称 | 群ID | 备注 |
+|--------|------|------|
+| 待补充 | | |
+
+### 会议记录
+| 会议主题 | 会议ID | 日期 | 关键结论 |
+|----------|--------|------|----------|
+| 待补充 | | | |
+
+---
+
+## 进展日志
+
+### {date}
+- 需求日志文档初始化创建
+
+---
+
+## 决策记录
+
+---
+
+## 待办事项
+"""
+    r_doc = mcpcall("wps-dailyoffice.write_doc",
+        action="create",
+        name=doc_name,
+        doc_type="doc",
+        content_markdown=log_template,
+        target_folder_id=quarter_folder_id)
+    if not r_doc.get("file"):
+        print(f"❌ 创建日志文档失败: {r_doc}", file=sys.stderr)
+        sys.exit(1)
+    doc_url = r_doc["file"]["link_url"]
+    doc_id  = r_doc["file"]["id"]
+    print(f"  ✅ 日志文档: {doc_url}")
+
+    # Step 3: 把日志文档 URL 更新到详情记录
+    r_upd = mcpcall("wps365.dbsheet.update_records",
+        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_DETAIL},
+        body={"records": [{"id": detail_record_id,
+                           "fields_value": json.dumps({"需求日志文档": doc_url}, ensure_ascii=False)}]})
+    if r_upd.get("code") != 0:
+        print(f"⚠️  更新详情记录日志URL失败: {r_upd}", file=sys.stderr)
+
+    # Step 4: 创建总览记录
+    overview_fields = {
+        "需求名称": name,
+        "当前状态": args.status,
+        "详情记录ID": detail_record_id,
+    }
+    if args.ezone: overview_fields["Ezone卡片"] = args.ezone
+    if args.prd:   overview_fields["PRD文档"]   = args.prd
+    if date:       overview_fields["需求提出时间"] = date
+
+    r_ov = mcpcall("wps365.dbsheet.create_records",
+        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_OVERVIEW},
+        body={"records": [{"fields_value": json.dumps(overview_fields, ensure_ascii=False)}]})
+    if r_ov.get("code") != 0:
+        print(f"❌ 创建总览记录失败: {r_ov}", file=sys.stderr)
+        sys.exit(1)
+    ov_id = r_ov["data"]["records"][0]["id"]
+    print(f"  ✅ 总览记录 ID: {ov_id}")
+
+    print(f"\n🎉 需求【{name}】添加完成")
+    print(f"   台账: https://www.kdocs.cn/l/cgjRzNidLF5P")
+    print(f"   日志: {doc_url}")
+
+if __name__ == "__main__":
+    main()
