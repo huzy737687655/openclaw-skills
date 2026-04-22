@@ -8,5 +8,6 @@
   "LOG_ROOT_ID": "需求日志文档根文件夹ID",
   "QUARTER_FOLDERS": {
     "2026-Q2": "2026-Q2文件夹ID"
-  }
+  },
+  "MEETING_ARCHIVE_DAYS": 3
 }

@@ -100,6 +100,47 @@ python3 skills/req-tracker/scripts/req_get.py --name "需求名称"
 
 ---
 
+### 6. 会议归档（定时 / 手动触发）
+
+**每天 18:00 自动运行**，或你说"帮我归档今天的会议"时触发。
+
+```bash
+# Step1: 拉取当天会议，输出 pending 列表
+python3 skills/req-tracker/scripts/req_meeting_sync.py
+
+# Step2: 我解析你的回复后，调用确认脚本
+python3 skills/req-tracker/scripts/req_meeting_confirm.py \
+  --replies '{"会议ID1":"需求名称","会议ID2":"忽略"}'
+```
+
+**本地归档文件** `references/meeting_archive.json`（map 结构，会议ID为key）：
+```json
+{
+  "meetings": {
+    "abc123": {"title":"评审会","date":"2026-04-22","status":"archived","req_name":"节点亲和性调度"},
+    "xyz456": {"title":"周例会","date":"2026-04-22","status":"ignored","req_name":null}
+  },
+  "last_sync": "2026-04-22T18:00:00"
+}
+```
+
+状态值：`pending`（待确认）/ `archived`（已归档）/ `ignored`（无需归档）
+
+保留天数由 `config.json` 的 `MEETING_ARCHIVE_DAYS` 控制（默认 3 天）。
+
+**问询格式**（批量，每批 5 条）：
+```
+📋 发现 N 条未归档会议，分 X 批确认
+
+── 第 1 批 ──
+1. [14:00] 节点亲和性调度评审（45分钟）
+2. [15:00] 周例会（60分钟）
+...
+回复格式：1-需求名称 2-忽略 ...
+```
+
+---
+
 ## 季度文件夹管理
 
 `references/quarters.json` 记录各季度文件夹 ID（不含敏感信息时可提交）。
