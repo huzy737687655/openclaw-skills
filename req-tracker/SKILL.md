@@ -1,6 +1,6 @@
 ---
 name: req-tracker
-description: 需求管理台账操作技能。用于在 WPS 多维表中管理研发需求全生命周期，包括：新增需求（自动创建总览记录+详情记录+需求日志文档）、更新需求状态或关键时间节点、查询需求列表或详情、从会议纪要/群聊自动追加日志到需求日志文档。当用户说"新增需求"、"更新需求状态"、"查看需求列表"、"把会议内容写进需求日志"、"需求提测了"、"需求上线了"等与需求跟踪相关的操作时触发。
+description: 需求管理台账操作技能。用于在 WPS 多维表中管理研发需求全生命周期，包括：从需求沟通群自动提取需求信息（群名/聊天记录/文档/人员角色）、新增需求（自动创建总览记录+详情记录+需求日志文档）、更新需求状态或关键时间节点、查询需求列表或详情、从会议纪要/群聊自动追加日志到需求日志文档。当用户说"从群里提取需求信息"、"新增需求"、"更新需求状态"、"查看需求列表"、"把会议内容写进需求日志"、"需求提测了"、"需求上线了"等与需求跟踪相关的操作时触发。
 ---
 
 # 需求管理台账 Skill
@@ -52,6 +52,71 @@ cp req-tracker/config.example.json req-tracker/config.json
 ---
 
 ## 操作流程
+
+### 0. 从需求沟通群提取信息（新增需求前置步骤）
+
+当用户提供群名（如「支持物理队列 AICP-2652 需求沟通群」）时，**先执行本步骤**，自动提取结构化需求信息，再录入台账。
+
+```bash
+python3 skills/req-tracker/scripts/req_chat_extract.py \
+  --group-name "支持物理队列 AICP-2652" \
+  --days 7
+```
+
+**脚本执行逻辑**：
+
+1. **搜索群聊** — 通过关键词调用 `mcp_message.search_chats` 找到群 ID
+   - 若唯一匹配 → 直接使用
+   - 若多个匹配 → 列出让用户确认
+
+2. **解析群名中的 Ezone 卡片** — 正则匹配 `[A-Z]+-\d+` 格式
+   - 如 `AICP-2652` → 拼接为 `https://ezone.ksyun.com/project/AICP/2652`
+
+3. **拉取近 N 天聊天记录**（默认 7 天）— `mcp_message.get_chat_messages`
+   - 解析 `rich_text` / `text` 消息中的纯文本和内嵌文档
+   - 提取消息中的 URL（kdocs / figma / ezone）
+
+4. **识别 PRD 文档**：
+   - 优先从消息中找名称含 "PRD" 的内嵌云文档
+   - 若无，调用 `mcp_yundoc.search` 搜索云文档库
+
+5. **推断人员角色**（按发言内容关键词判断）：
+   - 产品经理：发过 PRD / 需求 / 评审 / OpenAPI 定义等内容
+   - 前端：发过 Figma / 设计稿 / 交互 等内容
+   - 研发：发过 API / 接口 / 实现方案等内容
+
+6. **输出结构化结果** + 可直接复用的 `req_add.py` 命令
+
+**输出示例**：
+```
+需求名称:  支持物理队列 AICP-2652
+Ezone卡片: https://ezone.ksyun.com/project/AICP/2652
+PRD文档:   https://www.kdocs.cn/l/ck30r0CZM9UD
+产品经理:  杨凯文
+
+参与人员:
+  - 杨凯文 (产品经理)
+  - 徐彤昊 (前端)
+  - 孔尧 (研发)
+
+群内文档:
+  [kdoc] 【PRD】支持物理队列.otl
+    https://www.kdocs.cn/l/ck30r0CZM9UD
+  [figma] 设计文档链接
+    https://www.figma.com/...
+
+─── 可直接用于 req_add.py 的参数 ───
+python3 skills/req-tracker/scripts/req_add.py \
+  --name "支持物理队列 AICP-2652" \
+  --ezone "https://ezone.ksyun.com/project/AICP/2652" \
+  --prd "https://www.kdocs.cn/l/ck30r0CZM9UD" \
+  --pm "杨凯文" \
+  --status "待评估"
+```
+
+> 💡 **完整新增需求流程**：先运行 `req_chat_extract.py` 拿到信息 → 补充 `--dev`/`--frontend`/`--date` 等手动信息 → 运行 `req_add.py`
+
+---
 
 ### 1. 新增需求
 
