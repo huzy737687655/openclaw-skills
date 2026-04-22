@@ -1,0 +1,12 @@
+{
+  "_comment": "复制此文件为 config.json，填入你自己的 WPS 配置",
+  "DRIVE_ID": "你的WPS网盘ID",
+  "DB_FILE_ID": "需求管理台账.dbt 的文件ID",
+  "DB_URL": "https://www.kdocs.cn/l/你的台账链接",
+  "SHEET_OVERVIEW": 10,
+  "SHEET_DETAIL": 12,
+  "LOG_ROOT_ID": "需求日志文档根文件夹ID",
+  "QUARTER_FOLDERS": {
+    "2026-Q2": "2026-Q2文件夹ID"
+  }
+}

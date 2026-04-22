@@ -9,9 +9,12 @@ import subprocess
 import sys
 from datetime import datetime
 
-DB_FILE_ID     = "4xGJbDenmxMrRgWLhxVY1x64KCEum7ZGC"
-SHEET_OVERVIEW = 10
-SHEET_DETAIL   = 12
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+import _config as cfg
+DB_FILE_ID     = cfg.DB_FILE_ID
+SHEET_OVERVIEW = cfg.SHEET_OVERVIEW
+SHEET_DETAIL   = cfg.SHEET_DETAIL
 MCPORTER_CONFIG = os.path.join(os.path.dirname(__file__), "../../wps-cli/mcporter.json")
 
 DATE_FIELDS = {"研发介入时间", "提测时间", "上线时间"}

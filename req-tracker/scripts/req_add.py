@@ -10,12 +10,9 @@ import subprocess
 import sys
 from datetime import datetime
 
-# ── 配置 ────────────────────────────────────────────────────────────────
-DRIVE_ID       = "LazE8wX"
-DB_FILE_ID     = "4xGJbDenmxMrRgWLhxVY1x64KCEum7ZGC"
-SHEET_OVERVIEW = 10
-SHEET_DETAIL   = 12
-LOG_ROOT_ID    = "j1mQ9XUCurMNDpMH1R7urxym6AbPT77gn"
+sys.path.insert(0, os.path.dirname(__file__))
+import _config as cfg
+
 MCPORTER_CONFIG = os.path.join(os.path.dirname(__file__), "../../wps-cli/mcporter.json")
 QUARTERS_FILE   = os.path.join(os.path.dirname(__file__), "../references/quarters.json")
 
@@ -23,7 +20,7 @@ def load_quarters():
     if os.path.exists(QUARTERS_FILE):
         with open(QUARTERS_FILE) as f:
             return json.load(f)
-    return {"2026-Q2": "n6CW5xmmo1M3iqwAYYee1xC86uShcAsLf"}
+    return dict(cfg.QUARTER_FOLDERS)
 
 def save_quarters(q):
     os.makedirs(os.path.dirname(QUARTERS_FILE), exist_ok=True)
@@ -49,15 +46,11 @@ def get_or_create_quarter_folder(date_str):
     key = quarter_key(date_str)
     if key in quarters:
         return quarters[key]
-    # 创建新季度文件夹
     r = mcpcall("ksc-mcp-wps.file.create_in_folder",
-        path_params={"drive_id": DRIVE_ID, "parent_id": LOG_ROOT_ID},
+        path_params={"drive_id": cfg.DRIVE_ID, "parent_id": cfg.LOG_ROOT_ID},
         body={"name": key, "file_type": "folder", "on_name_conflict": "fail"})
     if r.get("code") == 0:
         folder_id = r["data"]["id"]
-    elif "already" in str(r).lower() or r.get("code") == 409:
-        print(f"文件夹 {key} 已存在，请手动更新 quarters.json", file=sys.stderr)
-        sys.exit(1)
     else:
         print(f"创建季度文件夹失败: {r}", file=sys.stderr)
         sys.exit(1)
@@ -84,7 +77,7 @@ def main():
     date = args.date
     print(f"📋 新增需求: {name}")
 
-    # Step 1: 创建详情记录（先不含日志文档 URL）
+    # Step 1: 创建详情记录
     detail_fields = {"需求名称": name}
     if args.pm:       detail_fields["产品经理"] = args.pm
     if args.dev:      detail_fields["依赖方研发"] = args.dev
@@ -94,7 +87,7 @@ def main():
     if args.dep_doc:  detail_fields["依赖层文档"] = args.dep_doc
 
     r_detail = mcpcall("wps365.dbsheet.create_records",
-        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_DETAIL},
+        path_params={"file_id": cfg.DB_FILE_ID, "sheet_id": cfg.SHEET_DETAIL},
         body={"records": [{"fields_value": json.dumps(detail_fields, ensure_ascii=False)}]})
     if r_detail.get("code") != 0:
         print(f"❌ 创建详情记录失败: {r_detail}", file=sys.stderr)
@@ -104,7 +97,7 @@ def main():
 
     # Step 2: 创建需求日志文档
     quarter_folder_id = get_or_create_quarter_folder(date)
-    month_day = date[5:].replace("-", "-")  # MM-DD
+    month_day = date[5:]  # MM-DD
     doc_name = f"{month_day}-[{name}]"
     log_template = f"""# {doc_name} 需求日志
 
@@ -152,12 +145,11 @@ def main():
         print(f"❌ 创建日志文档失败: {r_doc}", file=sys.stderr)
         sys.exit(1)
     doc_url = r_doc["file"]["link_url"]
-    doc_id  = r_doc["file"]["id"]
     print(f"  ✅ 日志文档: {doc_url}")
 
-    # Step 3: 把日志文档 URL 更新到详情记录
+    # Step 3: 把日志文档 URL 写回详情记录
     r_upd = mcpcall("wps365.dbsheet.update_records",
-        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_DETAIL},
+        path_params={"file_id": cfg.DB_FILE_ID, "sheet_id": cfg.SHEET_DETAIL},
         body={"records": [{"id": detail_record_id,
                            "fields_value": json.dumps({"需求日志文档": doc_url}, ensure_ascii=False)}]})
     if r_upd.get("code") != 0:
@@ -174,7 +166,7 @@ def main():
     if date:       overview_fields["需求提出时间"] = date
 
     r_ov = mcpcall("wps365.dbsheet.create_records",
-        path_params={"file_id": DB_FILE_ID, "sheet_id": SHEET_OVERVIEW},
+        path_params={"file_id": cfg.DB_FILE_ID, "sheet_id": cfg.SHEET_OVERVIEW},
         body={"records": [{"fields_value": json.dumps(overview_fields, ensure_ascii=False)}]})
     if r_ov.get("code") != 0:
         print(f"❌ 创建总览记录失败: {r_ov}", file=sys.stderr)
@@ -183,7 +175,8 @@ def main():
     print(f"  ✅ 总览记录 ID: {ov_id}")
 
     print(f"\n🎉 需求【{name}】添加完成")
-    print(f"   台账: https://www.kdocs.cn/l/cgjRzNidLF5P")
+    if cfg.DB_URL:
+        print(f"   台账: {cfg.DB_URL}")
     print(f"   日志: {doc_url}")
 
 if __name__ == "__main__":
