@@ -304,23 +304,18 @@ def main():
         lines.append(f'  --prd "{result["prd"]}" \\')
     if result["pm"]:
         lines.append(f'  --pm "{result["pm"]}" \\')
-    # 依赖层文档（取第一个）
-    dep_docs = docs_by_field.get("依赖层文档", [])
-    if dep_docs:
-        lines.append(f'  --dep-doc "{dep_docs[0]["url"]}" \\')
+    if result["ui"]:
+        lines.append(f'  --ui "{result["ui"]}" \\')
     if result["dev"]:
         lines.append(f'  --dev "{result["dev"]}" \\')
     if result["frontend"]:
         lines.append(f'  --frontend "{result["frontend"]}" \\')
+    # 把全部文档序列化为 JSON，传给 --docs
+    if all_docs:
+        docs_json = json.dumps(all_docs, ensure_ascii=False)
+        lines.append(f"  --docs '{docs_json}' \\")
     lines.append(f'  --status "待评估"')
     print("\n".join(lines))
-
-    # 提示未映射到 req_add 的文档
-    ui_docs = docs_by_field.get("UI设计稿", [])
-    if ui_docs:
-        print(f"\n💡 UI设计稿（可手动补充到需求日志文档）:")
-        for doc in ui_docs:
-            print(f"   {doc['name']}: {doc['url']}")
 
 if __name__ == "__main__":
     main()

@@ -68,7 +68,9 @@ def main():
     parser.add_argument("--frontend", default="",     help="前端同学")
     parser.add_argument("--projects", default="",     help="涉及项目")
     parser.add_argument("--config",   default="",     help="涉及配置")
-    parser.add_argument("--dep-doc",  default="",     help="依赖层文档链接")
+    parser.add_argument("--dep-doc",  default="",     help="依赖层文档链接（保留兼容）")
+    parser.add_argument("--docs",     default="",     help='文档汇总 JSON，写入日志文档关联资源章节，格式：[{"type":"PRD","name":"xxx","url":"yyy","sender":"zzz"}]')
+    parser.add_argument("--ui",       default="",     help="UI同学")
     parser.add_argument("--status",   default="待评估", help="初始状态")
     parser.add_argument("--date",     default=datetime.now().strftime("%Y-%m-%d"), help="需求提出时间 YYYY-MM-DD")
     args = parser.parse_args()
@@ -85,7 +87,6 @@ def main():
     if args.projects: detail_fields["涉及项目"] = args.projects
     if args.config:   detail_fields["涉及配置"] = args.config
     if args.dep_doc:  detail_fields["依赖层文档"] = args.dep_doc
-
     r_detail = mcpcall("wps365.dbsheet.create_records",
         path_params={"file_id": cfg.DB_FILE_ID, "sheet_id": cfg.SHEET_DETAIL},
         body={"records": [{"fields_value": json.dumps(detail_fields, ensure_ascii=False)}]})
@@ -99,16 +100,60 @@ def main():
     quarter_folder_id = get_or_create_quarter_folder(date)
     month_day = date[5:]  # MM-DD
     doc_name = f"{month_day}-[{name}]"
+
+    # 构建关联资源章节
+    docs_list = []
+    if args.docs:
+        try:
+            docs_list = json.loads(args.docs)
+        except Exception:
+            pass
+
+    # 按类型分组
+    DOC_SECTIONS = [
+        ("PRD",    "📄 PRD 文档"),
+        ("UI",     "🎨 UI 设计稿"),
+        ("API",    "🔌 API / 接口文档"),
+        ("impl",   "🏗 实现方案"),
+        ("ezone",  "📌 Ezone 卡片"),
+        ("other",  "📎 其他文档"),
+    ]
+    doc_section_lines = []
+    docs_by_type = {}
+    for doc in docs_list:
+        docs_by_type.setdefault(doc.get("type_key", "other"), []).append(doc)
+
+    for type_key, section_title in DOC_SECTIONS:
+        docs = docs_by_type.get(type_key, [])
+        if not docs:
+            continue
+        doc_section_lines.append(f"\n### {section_title}")
+        for doc in docs:
+            sender_info = f"（{doc.get('sender','')} @ {doc.get('date','')}）" if doc.get("sender") else ""
+            doc_section_lines.append(f"- [{doc.get('name','文档')}]({doc.get('url','')}) {sender_info}")
+
+    # Ezone / PRD 单独补充（来自参数，防止 --docs 为空时遗漏）
+    if args.ezone and "ezone" not in docs_by_type:
+        doc_section_lines.append(f"\n### 📌 Ezone 卡片\n- [EZONE 卡片]({args.ezone})")
+    if args.prd and "prd" not in docs_by_type:
+        doc_section_lines.append(f"\n### 📄 PRD 文档\n- [PRD 文档]({args.prd})")
+
+    resource_block = "\n".join(doc_section_lines) if doc_section_lines else "（暂无，待补充）"
+
     log_template = f"""# {doc_name} 需求日志
 
 ## 基本信息
 - **需求名称**: {name}
 - **产品经理**: {args.pm or '待确认'}
+- **UI同学**: {args.ui or '待确认'}
+- **前端同学**: {args.frontend or '待确认'}
+- **依赖方研发**: {args.dev or '待确认'}
 - **创建时间**: {date}
 
 ---
 
 ## 关联资源
+{resource_block}
 
 ### 需求相关群
 | 群名称 | 群ID | 备注 |
