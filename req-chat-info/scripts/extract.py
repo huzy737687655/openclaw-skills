@@ -31,15 +31,19 @@ ROLE_HINTS = {
 
 # ── 文档类型识别规则 ─────────────────────────────────────────────────────────
 DOC_RULES = [
-    (1, "prd",   "PRD文档",    ["PRD", "prd", "需求文档"],                              ["kdocs.cn"]),
-    (2, "ui",    "UI设计稿",   ["设计稿", "设计文档", "UI", "交互"],                    ["figma.com", "mastergo.com"]),
-    (3, "api",   "依赖层文档", ["API文档", "接口文档", "OpenAPI", "swagger"],            ["kdocs.cn", "apifox", "swagger"]),
-    (4, "impl",  "依赖层文档", ["实现方案", "控制台实现", "后端方案", "设计方案", "任务文档"], ["kdocs.cn"]),
-    (5, "ezone", "Ezone卡片",  ["ezone"],                                               ["ezone.ksyun.com"]),
-    (9, "other", "附件",       [],                                                      ["kdocs.cn", "figma.com"]),
+    (1, "prd",   "PRD文档",    ["PRD", "prd", "需求文档"],                                         ["kdocs.cn"]),
+    (2, "ui",    "UI设计稿",   ["设计稿", "设计文档", "UI稿", "交互设计", "视觉"],                  ["figma.com", "mastergo.com"]),
+    (3, "api",   "依赖层文档", ["API文档", "接口文档", "OpenAPI", "swagger", "API变化", "API 变化",
+                                "接口变更", "接口变化", "API变更"],                                 ["kdocs.cn", "365.kdocs.cn", "apifox", "swagger"]),
+    (4, "impl",  "依赖层文档", ["实现方案", "控制台实现", "后端方案", "设计方案", "任务文档"],       ["kdocs.cn", "365.kdocs.cn"]),
+    (5, "ezone", "Ezone卡片",  ["ezone"],                                                          ["ezone.ksyun.com"]),
 ]
 
 def classify_doc(name, url):
+    """
+    按规则分类文档，返回 (type_key, field_name)。
+    无法归类时返回 ("unknown", None)，调用方需要向用户询问。
+    """
     name_lower = (name or "").lower()
     url_lower  = (url  or "").lower()
     for _, type_key, field_name, name_kws, url_kws in sorted(DOC_RULES, key=lambda x: x[0]):
@@ -47,7 +51,7 @@ def classify_doc(name, url):
         url_hit  = any(kw.lower() in url_lower  for kw in url_kws)
         if name_hit or (url_hit and name_kws == []):
             return type_key, field_name
-    return "other", "附件"
+    return "unknown", None  # 需要人工确认
 
 def mcpcall(tool, **kwargs):
     args_str = ", ".join(f"{k}: {json.dumps(v)}" for k, v in kwargs.items())
@@ -252,7 +256,7 @@ def main():
     print(f"  共 {len(messages)} 条")
 
     # 聚合文档
-    seen_urls, all_docs = set(), []
+    seen_urls, all_docs, unknown_docs = set(), [], []
     for m in extracted:
         for doc in m.get("docs", []):
             url = doc.get("url", "")
@@ -260,8 +264,12 @@ def main():
                 continue
             seen_urls.add(url)
             type_key, field_name = classify_doc(doc["name"], url)
-            all_docs.append({**doc, "type_key": type_key, "field_name": field_name,
-                              "sender": m["sender"], "date": m["date"]})
+            entry = {**doc, "type_key": type_key, "field_name": field_name,
+                     "sender": m["sender"], "date": m["date"]}
+            if type_key == "unknown":
+                unknown_docs.append(entry)
+            else:
+                all_docs.append(entry)
 
     prd_doc = next((d for d in all_docs if d["type_key"] == "prd"), None)
     if not prd_doc:
@@ -296,6 +304,7 @@ def main():
         "dev":       ", ".join(dev_list) or None,
         "participants":          [{"name": n, "role": r} for n, r in sorted(roles.items(), key=lambda x: x[1])],
         "unknown_doc_senders":   unknown_doc_senders,
+        "unknown_docs":          unknown_docs,
         "docs_by_field":         docs_by_field,
         "all_docs":              all_docs,
     }
@@ -338,23 +347,31 @@ def main():
             if doc.get("sender"):
                 print(f"      发送人: {doc['sender']}  {doc.get('date','')}")
 
-    # ── 未知角色人员 → 输出询问提示 ──────────────────────────────────────────
+    # ── 未知角色人员询问 ──────────────────────────────────────────────────────
     if unknown_doc_senders:
         print(f"\n{'─'*55}")
         print("⚠️  以下人员发过文档，但我不认识他们的身份，请告诉我：")
         for i, name in enumerate(unknown_doc_senders, 1):
-            # 展示他们发过的文档
             their_docs = [d for d in all_docs if d.get("sender") == name]
             doc_names  = "、".join(d["name"] for d in their_docs) or "（文档名未知）"
             print(f"  {i}. {name}  →  发过：{doc_names}")
         print()
         print("角色选项：产品经理 / UI / 前端 / 依赖方研发 / 测试 / 其他")
-        print()
         confirm_example = json.dumps(
             {name: "角色" for name in unknown_doc_senders}, ensure_ascii=False)
-        print(f"回复格式（告诉我后我会保存到联系人档案）：")
-        print(f"  python3 skills/req-chat-info/scripts/extract.py \\")
-        print(f"    --confirm-roles '{confirm_example}'")
+        print(f"\n  --confirm-roles '{confirm_example}'")
+
+    # ── 无法分类的文档询问 ───────────────────────────────────────────────────
+    if unknown_docs:
+        print(f"\n{'─'*55}")
+        print("⚠️  以下文档我不确定是什么类型，请告诉我应该归到哪类：")
+        type_options = "PRD文档 / UI设计稿 / 依赖层文档（API/实现方案）/ 附件 / 忽略"
+        for i, doc in enumerate(unknown_docs, 1):
+            print(f"  {i}. 【{doc['name']}】")
+            print(f"     链接: {doc['url']}")
+            print(f"     发送人: {doc.get('sender','')} @ {doc.get('date','')}")
+        print(f"\n  类型选项：{type_options}")
+        print("  告诉我后我会把它归入正确分类并写进日志文档。")
 
     print(f"\n{'─'*55}")
     print("可直接用于 req_add.py 的参数：")
