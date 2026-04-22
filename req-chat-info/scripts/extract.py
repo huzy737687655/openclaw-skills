@@ -126,30 +126,37 @@ def parse_messages(messages):
 def infer_roles(extracted):
     """
     角色推断优先级：
-    1. 本地联系人档案（contacts.json）
+    1. 本地联系人档案（user_id 精确匹配，fallback 姓名匹配）
     2. 发言内容关键词匹配
     3. 发出过文档但无法判断 → 标记为 "未知（发过文档）"
     4. 其他 → "参与者"
+    返回：{ sender_name: role }
     """
-    texts_by_sender  = {}
-    has_docs_by_sender = {}
+    # 按 sender 聚合文本和文档
+    info_by_sender = {}
     for m in extracted:
-        texts_by_sender.setdefault(m["sender"], []).append(m["text"])
+        name = m["sender"]
+        uid  = m.get("sender_id", "")
+        if name not in info_by_sender:
+            info_by_sender[name] = {"uid": uid, "texts": [], "has_docs": False}
+        info_by_sender[name]["texts"].append(m["text"])
         if m.get("docs"):
-            has_docs_by_sender[m["sender"]] = True
+            info_by_sender[name]["has_docs"] = True
 
     result = {}
-    for sender in texts_by_sender:
-        # 1. 查联系人档案
-        known_role = contacts_db.get_role(sender)
+    for name, info in info_by_sender.items():
+        uid = info["uid"]
+
+        # 1. 联系人档案（user_id 优先，fallback name）
+        known_role = contacts_db.get_role(user_id=uid, name=name)
         if known_role:
-            result[sender] = known_role
+            result[name] = known_role
             continue
 
-        # 2. 关键词匹配（文本 + 文档名）
-        combined = " ".join(texts_by_sender[sender])
+        # 2. 关键词匹配（文本 + 文档名/URL）
+        combined = " ".join(info["texts"])
         for m in extracted:
-            if m["sender"] == sender:
+            if m["sender"] == name:
                 for doc in m.get("docs", []):
                     combined += " " + doc.get("name", "") + " " + doc.get("url", "")
 
@@ -160,12 +167,11 @@ def infer_roles(extracted):
                 break
 
         if matched:
-            result[sender] = matched
-        elif has_docs_by_sender.get(sender):
-            # 3. 发过文档但识别不出角色 → 需要确认
-            result[sender] = "未知（发过文档）"
+            result[name] = matched
+        elif info["has_docs"]:
+            result[name] = "未知（发过文档）"
         else:
-            result[sender] = "参与者"
+            result[name] = "参与者"
 
     return result
 
@@ -223,12 +229,22 @@ def main():
     if args.confirm_roles:
         try:
             confirmations = json.loads(args.confirm_roles)
+            # 格式支持两种：
+            # {"user_id": {"name":"姓名","role":"角色"}} （精确，推荐）
+            # {"姓名": "角色"} （兼容旧格式，user_id 留空）
         except Exception:
             print("--confirm-roles 格式错误，应为 JSON 字符串", file=sys.stderr)
             sys.exit(1)
-        for name, role in confirmations.items():
-            contacts_db.upsert(name, role)
-            print(f"  ✅ 已保存: {name} → {role}")
+        for key, val in confirmations.items():
+            if isinstance(val, dict):
+                # 新格式：key=user_id, val={"name":..., "role":...}
+                contacts_db.upsert(key, val["name"], val["role"],
+                                   team=val.get("team",""), note=val.get("note",""))
+                print(f"  ✅ 已保存: [{key}] {val['name']} → {val['role']}")
+            else:
+                # 兼容旧格式：key=name, val=role，user_id 用 name 占位
+                contacts_db.upsert(key, key, val)
+                print(f"  ✅ 已保存: {key} → {val}（无user_id，下次遇到同名者可能误匹配）")
         print(f"\n共保存 {len(confirmations)} 条联系人信息。")
         return
 
@@ -352,16 +368,24 @@ def main():
 
     # ── 未知角色人员询问 ──────────────────────────────────────────────────────
     if unknown_doc_senders:
+        # 收集未知人员的 user_id
+        uid_map = {}
+        for m in extracted:
+            if m["sender"] in unknown_doc_senders:
+                uid_map[m["sender"]] = m.get("sender_id", "")
+
         print(f"\n{'─'*55}")
         print("⚠️  以下人员发过文档，但我不认识他们的身份，请告诉我：")
         for i, name in enumerate(unknown_doc_senders, 1):
             their_docs = [d for d in all_docs if d.get("sender") == name]
             doc_names  = "、".join(d["name"] for d in their_docs) or "（文档名未知）"
-            print(f"  {i}. {name}  →  发过：{doc_names}")
+            uid        = uid_map.get(name, "")
+            print(f"  {i}. {name}（id: {uid}）  →  发过：{doc_names}")
         print()
         print("角色选项：产品经理 / UI / 前端 / 依赖方研发 / 测试 / 其他")
-        confirm_example = json.dumps(
-            {name: "角色" for name in unknown_doc_senders}, ensure_ascii=False)
+        # 生成带 user_id 的确认命令示例
+        confirm_obj = {uid_map.get(n, n): {"name": n, "role": "角色"} for n in unknown_doc_senders}
+        confirm_example = json.dumps(confirm_obj, ensure_ascii=False)
         print(f"\n  --confirm-roles '{confirm_example}'")
 
     # ── 无法分类的文档询问 ───────────────────────────────────────────────────
