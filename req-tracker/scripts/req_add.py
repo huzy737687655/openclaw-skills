@@ -111,17 +111,35 @@ def main():
 
     # 按类型分组
     DOC_SECTIONS = [
-        ("PRD",    "📄 PRD 文档"),
-        ("UI",     "🎨 UI 设计稿"),
-        ("API",    "🔌 API / 接口文档"),
-        ("impl",   "🏗 实现方案"),
-        ("ezone",  "📌 Ezone 卡片"),
-        ("other",  "📎 其他文档"),
+        ("prd",   "📄 PRD 文档"),
+        ("ui",    "🎨 UI 设计稿"),
+        ("api",   "🔌 API / 接口文档"),
+        ("impl",  "🏗 实现方案"),
+        ("ezone", "📌 Ezone 卡片"),
+        ("other", "📎 其他文档"),
     ]
     doc_section_lines = []
     docs_by_type = {}
     for doc in docs_list:
         docs_by_type.setdefault(doc.get("type_key", "other"), []).append(doc)
+
+    # 加载联系人档案，用于查 role/team
+    contacts_file = os.path.join(os.path.dirname(__file__),
+                                 "../../req-chat-info/references/contacts.json")
+    contacts = {}
+    if os.path.exists(contacts_file):
+        with open(contacts_file, encoding="utf-8") as f:
+            contacts = json.load(f)
+
+    def sender_label(sender_name):
+        """返回 '依赖方研发/KAIC后端 - 孔尧' 格式，找不到就直接返回姓名"""
+        for entry in contacts.values():
+            if entry.get("name") == sender_name:
+                role = entry.get("role", "")
+                team = entry.get("team", "")
+                label = "/".join(filter(None, [role, team]))
+                return f"{label} - {sender_name}" if label else sender_name
+        return sender_name
 
     for type_key, section_title in DOC_SECTIONS:
         docs = docs_by_type.get(type_key, [])
@@ -129,8 +147,17 @@ def main():
             continue
         doc_section_lines.append(f"\n### {section_title}")
         for doc in docs:
-            sender_info = f"（{doc.get('sender','')} @ {doc.get('date','')}）" if doc.get("sender") else ""
-            doc_section_lines.append(f"- [{doc.get('name','文档')}]({doc.get('url','')}) {sender_info}")
+            sender = doc.get("sender", "")
+            date_str = doc.get("date", "")
+            if sender and sender != "云文档搜索":
+                sender_str = f"（{sender_label(sender)}）"
+            elif sender == "云文档搜索":
+                sender_str = "（云文档搜索）"
+            else:
+                sender_str = ""
+            doc_section_lines.append(
+                f"- [{doc.get('name','文档')}]({doc.get('url','')}) {sender_str}"
+            )
 
     # Ezone / PRD 单独补充（来自参数，防止 --docs 为空时遗漏）
     if args.ezone and "ezone" not in docs_by_type:
