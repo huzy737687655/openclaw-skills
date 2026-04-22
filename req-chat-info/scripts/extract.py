@@ -31,12 +31,15 @@ ROLE_HINTS = {
 
 # ── 文档类型识别规则 ─────────────────────────────────────────────────────────
 DOC_RULES = [
-    (1, "prd",   "PRD文档",    ["PRD", "prd", "需求文档"],                                         ["kdocs.cn"]),
-    (2, "ui",    "UI设计稿",   ["设计稿", "设计文档", "UI稿", "交互设计", "视觉"],                  ["figma.com", "mastergo.com"]),
-    (3, "api",   "依赖层文档", ["API文档", "接口文档", "OpenAPI", "swagger", "API变化", "API 变化",
-                                "接口变更", "接口变化", "API变更"],                                 ["kdocs.cn", "365.kdocs.cn", "apifox", "swagger"]),
-    (4, "impl",  "依赖层文档", ["实现方案", "控制台实现", "后端方案", "设计方案", "任务文档"],       ["kdocs.cn", "365.kdocs.cn"]),
-    (5, "ezone", "Ezone卡片",  ["ezone"],                                                          ["ezone.ksyun.com"]),
+    # ⭐ 最高优先：API/接口类文档，是需求中最关键的依赖信息
+    (1, "api",   "依赖层文档", ["API文档", "接口文档", "OpenAPI", "swagger",
+                                "API变化", "API 变化", "API变更", "接口变更", "接口变化",
+                                "API设计", "接口设计", "接口定义", "API定义",
+                                "api", "接口"],                                          ["kdocs.cn", "365.kdocs.cn", "apifox.com", "swagger.io"]),
+    (2, "prd",   "PRD文档",    ["PRD", "prd", "需求文档"],                              ["kdocs.cn", "365.kdocs.cn"]),
+    (3, "ui",    "UI设计稿",   ["设计稿", "设计文档", "UI稿", "交互设计", "视觉"],      ["figma.com", "mastergo.com"]),
+    (4, "impl",  "依赖层文档", ["实现方案", "控制台实现", "后端方案", "设计方案", "任务文档"], ["kdocs.cn", "365.kdocs.cn"]),
+    (5, "ezone", "Ezone卡片",  ["ezone"],                                               ["ezone.ksyun.com"]),
 ]
 
 def classify_doc(name, url):
