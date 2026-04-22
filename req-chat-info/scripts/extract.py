@@ -175,18 +175,38 @@ def infer_roles(extracted):
 
     return result
 
-def search_prd_in_cloud(req_name):
+def search_candidates_in_cloud(req_name, doc_type="prd"):
+    """
+    在云文档库中搜索候选文档，返回列表供用户确认。
+    doc_type: "prd" 或 "api"
+    """
+    if doc_type == "prd":
+        keyword = f"PRD {req_name}"
+        name_hints = ["PRD", "需求文档", "产品需求"]
+    else:
+        keyword = req_name
+        name_hints = ["API", "接口", "实现方案", "任务文档", "设计方案"]
+
     try:
         r = mcpcall("ksc-mcp-wps.mcp_yundoc.search",
-            body={"keyword": f"PRD {req_name}", "page_size": 5})
+            body={"keyword": keyword, "page_size": 8})
         items = json.loads(r["result"]["content"][0]["text"]).get("items", [])
+        candidates = []
         for item in items:
             f = item.get("file", {})
-            if "PRD" in f.get("name", ""):
-                return {"name": f["name"], "url": f.get("link_url", ""), "source": "search"}
+            name = f.get("name", "")
+            url  = f.get("link_url", "")
+            if not url:
+                continue
+            # 对 PRD 严格匹配；对 api 宽松匹配（含需求名关键词即可）
+            req_kw = req_name.replace("支持", "").strip()
+            name_match = any(h in name for h in name_hints)
+            req_match  = any(kw in name for kw in req_name.split() + [req_kw])
+            if name_match or req_match:
+                candidates.append({"name": name, "url": url, "source": "search_candidate"})
+        return candidates
     except Exception:
-        pass
-    return None
+        return []
 
 def extract_ezone_from_name(group_name):
     m = re.search(r'([A-Z]+)-(\d+)', group_name, re.IGNORECASE)
@@ -290,14 +310,22 @@ def main():
             else:
                 all_docs.append(entry)
 
-    prd_doc = next((d for d in all_docs if d["type_key"] == "prd"), None)
+    prd_doc  = next((d for d in all_docs if d["type_key"] == "prd"), None)
+    api_docs = [d for d in all_docs if d["type_key"] == "api"]
+
+    # ── 缺失 PRD → 搜索候选，待用户确认 ─────────────────────────────────────
+    prd_candidates = []
     if not prd_doc:
-        fallback = search_prd_in_cloud(req_name)
-        if fallback:
-            type_key, field_name = classify_doc(fallback["name"], fallback["url"])
-            prd_doc = {**fallback, "type_key": type_key, "field_name": field_name,
-                       "sender": "云文档搜索", "date": ""}
-            all_docs.insert(0, prd_doc)
+        print("  ⚠️  群内未发现 PRD，搜索云文档候选...")
+        prd_candidates = search_candidates_in_cloud(req_name, doc_type="prd")
+        print(f"  找到 {len(prd_candidates)} 个候选")
+
+    # ── 缺失依赖层文档（API/接口）→ 搜索候选，待用户确认 ────────────────────
+    api_candidates = []
+    if not api_docs:
+        print("  ⚠️  群内未发现依赖层文档，搜索云文档候选...")
+        api_candidates = search_candidates_in_cloud(req_name, doc_type="api")
+        print(f"  找到 {len(api_candidates)} 个候选")
 
     # 推断角色
     roles         = infer_roles(extracted)
@@ -321,11 +349,13 @@ def main():
         "ui":        ", ".join(ui_list) or None,
         "frontend":  ", ".join(frontend_list) or None,
         "dev":       ", ".join(dev_list) or None,
-        "participants":          [{"name": n, "role": r} for n, r in sorted(roles.items(), key=lambda x: x[1])],
-        "unknown_doc_senders":   unknown_doc_senders,
-        "unknown_docs":          unknown_docs,
-        "docs_by_field":         docs_by_field,
-        "all_docs":              all_docs,
+        "participants":        [{"name": n, "role": r} for n, r in sorted(roles.items(), key=lambda x: x[1])],
+        "unknown_doc_senders": unknown_doc_senders,
+        "unknown_docs":        unknown_docs,
+        "prd_candidates":      prd_candidates,
+        "api_candidates":      api_candidates,
+        "docs_by_field":       docs_by_field,
+        "all_docs":            all_docs,
     }
 
     if args.output == "json":
@@ -399,6 +429,24 @@ def main():
             print(f"     发送人: {doc.get('sender','')} @ {doc.get('date','')}")
         print(f"\n  类型选项：{type_options}")
         print("  告诉我后我会把它归入正确分类并写进日志文档。")
+
+    # ── 云文档候选确认（PRD 缺失）────────────────────────────────────────────
+    if prd_candidates:
+        print(f"\n{'─'*55}")
+        print("📄 群内未发现 PRD，从云文档库搜到以下候选，请确认哪个是：")
+        for i, doc in enumerate(prd_candidates, 1):
+            print(f"  {i}. {doc['name']}")
+            print(f"     {doc['url']}")
+        print("\n  回复「PRD是第N个」或「都不是」")
+
+    # ── 云文档候选确认（依赖层文档缺失）─────────────────────────────────────
+    if api_candidates:
+        print(f"\n{'─'*55}")
+        print("🔌 群内未发现依赖层文档（API/接口），从云文档库搜到以下候选，请确认：")
+        for i, doc in enumerate(api_candidates, 1):
+            print(f"  {i}. {doc['name']}")
+            print(f"     {doc['url']}")
+        print("\n  回复「依赖层文档是第N、M个」或「都不是」")
 
     print(f"\n{'─'*55}")
     print("可直接用于 req_add.py 的参数：")
